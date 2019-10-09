@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/bradfitz/gomemcache/memcache"
@@ -46,7 +47,45 @@ func (c *Cache) DeleteUser(ctx context.Context, tx *sql.Tx, userID int64) error 
 
 // FilterUsersID retrieve usersID from the cache storage
 func (c *Cache) FilterUsersID(ctx context.Context, filter iface.FilterUsers) ([]int64, error) {
-	return c.storage.FilterUsersID(ctx, filter)
+	var ids = make([]int64, 0)
+	cachekey := "ids"
+
+	if len(filter.Email) != 0 {
+		cachekey = fmt.Sprintf("%s-email-%s", cachekey, filter.Email)
+	}
+
+	item, err := c.client.Get(cachekey)
+	if err != nil {
+		log.Log(err)
+	} else if item != nil {
+		err = binary.Read(bytes.NewBuffer(item.Value), binary.LittleEndian, &ids)
+		if err != nil {
+			log.Log(err)
+		} else {
+			return ids, nil
+		}
+	}
+
+	idsFromDB, err := c.storage.FilterUsersID(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := new(bytes.Buffer)
+	err = binary.Write(buf, binary.LittleEndian, idsFromDB)
+	if err != nil {
+		log.Log(err)
+	} else {
+		err := c.client.Set(&memcache.Item{
+			Key:   cachekey,
+			Value: buf.Bytes(),
+		})
+		if err != nil {
+			log.Log(err)
+		}
+	}
+
+	return idsFromDB, nil
 }
 
 // FetchUsers retrieve users from the cache storage
